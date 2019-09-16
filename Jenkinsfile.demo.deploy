@@ -1,0 +1,76 @@
+// vim: ts=2:sw=2
+pipeline {
+  agent {
+    kubernetes {
+      label 'consul-deploy-demo'
+      defaultContainer 'helm'
+      yaml """
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    env: ci
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: preemptible
+            operator: In
+            values:
+            - no
+  containers:
+  - name: helm
+    image: alpine/helm:2.14.3
+    resources:
+      requests:
+        memory: "64Mi"
+        cpu: "0.5"
+    tty: true
+    command:
+    - cat
+  - name: jnlp
+    image: 'jenkins/jnlp-slave'
+    imagePullPolicy: Always
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "0.25"
+"""
+    }
+  }
+
+  environment {
+    GOOGLE_CREDENTIALS = credentials('terraform-gc')
+    GOOGLE_APPLICATION_CREDENTIALS = credentials('packer')
+    CLOUDFLARE_EMAIL = credentials('cloudflare-email')
+    CLOUDFLARE_TOKEN = credentials('cloudflare-token')
+  }
+
+  stages {
+    stage('Terraform Plan') {
+      environment {
+        ENVIRONMENT = "demo"
+        TF_VAR_project = "goodkarma-420"
+      }
+      steps {
+        withCredentials(bindings: [sshUserPrivateKey(credentialsId: 'zentail-ci-ssh-key', keyFileVariable: 'TF_VAR_ssh_key')]) {
+          sh 'ssh-keyscan -H github.com >> ~/.ssh/known_hosts'
+          sh '''
+          cat > ~/.ssh/config <<EOF
+          Host github.com
+              IdentityFile $TF_VAR_ssh_key
+          EOF
+          '''.stripIndent()
+          sh 'gcloud auth activate-service-account --key-file=$GOOGLE_CREDENTIALS'
+          sh 'gcloud config set project $TF_VAR_project'
+          sh 'gcloud config set compute/zone us-central1-a'
+          sh 'gcloud container clusters get-credentials $ENVIRONMENT-default-cluster-vpc'
+          sh 'helm repo update'
+          sh 'helm install --name consul ./'
+        }
+      }
+    }
+  }
+}
